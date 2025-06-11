@@ -2,7 +2,380 @@
 
 ## 概述
 
-這個部署指南提供 Tokyo Region → Taipei Region 遷移的具體執行命令和腳本，包含 EKS、ECS、EC2 三種計算服務的完整遷移流程。
+# AWS 跨區域工作負載遷移部署總覽
+
+## 概述
+
+本指南提供 Tokyo Region → Taipei Region 遷移的總覽和協調，包含 EKS、ECS、EC2 三種計算服務的完整遷移流程。
+
+## 📋 部署指南結構
+
+### 核心檔案
+
+| 檔案名稱 | 用途 | 適用服務 |
+|---------|------|----------|
+| `tpe_migration_deployment.md` | **總覽指南**（本檔案） | 所有服務 |
+| `eks_migration_deployment.md` | EKS 專用部署指南 | Kubernetes 叢集 |
+| `ecs_migration_deployment.md` | ECS 專用部署指南 | 容器服務 |
+| `ec2_migration_deployment.md` | EC2 專用部署指南 | 虛擬機器 |
+
+### 共用模組
+
+| 檔案名稱 | 用途 | 說明 |
+|---------|------|------|
+| `common_functions.sh` | 共用函數庫 | VPC、安全群組、ECR、RDS、DNS 管理 |
+| `config.sh.example` | 設定檔範本 | 統一的環境變數設定 |
+
+## 🚀 快速開始
+
+### 1. 環境準備
+
+```bash
+# 1. 複製設定檔範本
+cp config.sh.example config.sh
+
+# 2. 編輯設定檔，填入實際值
+vim config.sh
+# 或使用其他編輯器：nano config.sh, code config.sh
+
+# 3. 驗證設定
+./config.sh
+```
+
+### 2. 選擇遷移方案
+
+根據您的服務類型選擇對應的部署指南：
+
+#### 🎯 EKS 遷移
+```bash
+# 適用於：Kubernetes 叢集和容器化應用程式
+./eks_migration_deployment.md
+
+# 快速執行
+cd eks_migration
+./complete_eks_migration.sh
+```
+
+#### 🎯 ECS 遷移
+```bash
+# 適用於：ECS 服務和 Fargate 任務
+./ecs_migration_deployment.md
+
+# 快速執行
+cd ecs_migration
+./complete_ecs_migration.sh
+```
+
+#### 🎯 EC2 遷移
+```bash
+# 適用於：虛擬機器和 Auto Scaling 群組
+./ec2_migration_deployment.md
+
+# 快速執行
+cd ec2_migration
+./complete_ec2_migration.sh
+```
+
+### 3. 混合環境遷移
+
+如果您的環境包含多種服務，可以並行執行：
+
+```bash
+#!/bin/bash
+# complete_mixed_migration.sh
+source common_functions.sh
+load_config
+validate_basic_config
+
+echo "🚀 開始混合環境遷移..."
+
+# 準備共用基礎設施
+echo "📋 階段 1：準備基礎設施"
+get_vpc_resources
+
+# 設定 ECR 複製（背景執行）
+if [[ "$ECR_REPLICATION_ENABLED" == "true" ]]; then
+    setup_ecr_replication &
+    ECR_PID=$!
+fi
+
+# 遷移 RDS 資料庫（背景執行）
+if [[ "$RDS_MIGRATION_ENABLED" == "true" && -n "$DB_INSTANCE_ID" ]]; then
+    migrate_rds_database &
+    RDS_PID=$!
+fi
+
+# 並行執行服務遷移
+echo "📋 階段 2：並行服務遷移"
+
+# EKS 遷移
+if [[ -f "eks_migration_deployment.md" ]]; then
+    echo "啟動 EKS 遷移..."
+    (cd eks_migration && ./complete_eks_migration.sh) &
+    EKS_PID=$!
+fi
+
+# ECS 遷移
+if [[ -f "ecs_migration_deployment.md" ]]; then
+    echo "啟動 ECS 遷移..."
+    (cd ecs_migration && ./complete_ecs_migration.sh) &
+    ECS_PID=$!
+fi
+
+# EC2 遷移
+if [[ -f "ec2_migration_deployment.md" ]]; then
+    echo "啟動 EC2 遷移..."
+    (cd ec2_migration && ./complete_ec2_migration.sh) &
+    EC2_PID=$!
+fi
+
+# 等待所有遷移完成
+echo "📋 階段 3：等待遷移完成"
+
+if [[ -n "$EKS_PID" ]]; then
+    wait $EKS_PID
+    echo "✅ EKS 遷移完成"
+fi
+
+if [[ -n "$ECS_PID" ]]; then
+    wait $ECS_PID
+    echo "✅ ECS 遷移完成"
+fi
+
+if [[ -n "$EC2_PID" ]]; then
+    wait $EC2_PID
+    echo "✅ EC2 遷移完成"
+fi
+
+if [[ -n "$ECR_PID" ]]; then
+    wait $ECR_PID
+    echo "✅ ECR 複製完成"
+fi
+
+if [[ -n "$RDS_PID" ]]; then
+    wait $RDS_PID
+    echo "✅ RDS 遷移完成"
+fi
+
+echo "📋 階段 4：驗證所有服務"
+verify_migration_status "eks"
+verify_migration_status "ecs"
+verify_migration_status "ec2"
+
+echo "✅ 混合環境遷移完成！"
+```
+
+## 🏗️ VPC 基礎設施準備
+
+所有服務遷移都需要先準備 VPC 基礎設施：
+
+### 方案 A：複製來源區域 VPC 設定（推薦）
+
+```bash
+#!/bin/bash
+# replicate_vpc_from_source.sh
+source common_functions.sh
+load_config
+validate_basic_config
+
+echo "🔍 分析來源區域 VPC 設定..."
+
+# 使用共用函數複製 VPC
+# 詳細實作請參考 common_functions.sh 中的 get_vpc_resources 函數
+
+# 1. 獲取來源 VPC 資訊
+SOURCE_VPC_NAME="${VPC_NAME:-migration-vpc}"
+SOURCE_VPC_ID=$(aws ec2 describe-vpcs \
+    --filters "Name=tag:Name,Values=$SOURCE_VPC_NAME" "Name=state,Values=available" \
+    --query 'Vpcs[0].VpcId' --output text --region $SOURCE_REGION)
+
+if [[ "$SOURCE_VPC_ID" == "None" || -z "$SOURCE_VPC_ID" ]]; then
+    echo "❌ 找不到來源 VPC '$SOURCE_VPC_NAME'，請確認 VPC 名稱或使用方案 B"
+    exit 1
+fi
+
+echo "✅ 找到來源 VPC: $SOURCE_VPC_ID"
+
+# 2. 生成 CloudFormation 模板並部署
+# 詳細實作請參考原始的 replicate_vpc_from_source.sh
+
+echo "🚀 部署 VPC 基礎設施到目標區域..."
+# ... CloudFormation 部署邏輯 ...
+
+echo "✅ VPC 複製完成！"
+```
+
+### 方案 B：使用預定義模板
+
+```bash
+#!/bin/bash
+# create_new_vpc.sh
+source common_functions.sh
+load_config
+validate_basic_config
+
+echo "🏗️ 使用預定義模板建立 VPC..."
+
+# 直接部署預定義的 VPC 模板
+aws cloudformation deploy \
+    --template-file vpc-infrastructure-template.yaml \
+    --stack-name vpc-infrastructure \
+    --parameter-overrides VpcCidr=$VPC_CIDR VpcName=$VPC_NAME \
+    --region $TARGET_REGION
+
+echo "✅ VPC 建立完成！"
+```
+
+## 📊 遷移狀態監控
+
+### 統一驗證腳本
+
+```bash
+#!/bin/bash
+# verify_all_migrations.sh
+source common_functions.sh
+load_config
+
+echo "🔍 驗證所有服務遷移狀態..."
+
+# 檢查 VPC 基礎設施
+echo "=== VPC 基礎設施 ==="
+get_vpc_resources
+
+# 檢查各服務狀態
+echo "=== EKS 服務 ==="
+verify_migration_status "eks"
+
+echo "=== ECS 服務 ==="
+verify_migration_status "ecs"
+
+echo "=== EC2 服務 ==="
+verify_migration_status "ec2"
+
+# 檢查 RDS 狀態
+if [[ -n "$DB_INSTANCE_ID" ]]; then
+    echo "=== RDS 資料庫 ==="
+    aws rds describe-db-instances \
+        --db-instance-identifier "${DB_INSTANCE_ID}-taipei" \
+        --query 'DBInstances[0].{Status:DBInstanceStatus,Endpoint:Endpoint.Address}' \
+        --region $TARGET_REGION 2>/dev/null || echo "RDS 執行個體不存在"
+fi
+
+echo "✅ 驗證完成！"
+```
+
+## 🔄 DNS 流量切換
+
+### 統一流量切換
+
+```bash
+#!/bin/bash
+# switch_all_traffic.sh
+source common_functions.sh
+load_config
+
+if [[ -z "$HOSTED_ZONE_ID" ]]; then
+    echo "⚠️  HOSTED_ZONE_ID 未設定，跳過 DNS 切換"
+    exit 0
+fi
+
+echo "🔄 開始統一流量切換..."
+
+# EKS 流量切換
+if kubectl get service -n default your-service >/dev/null 2>&1; then
+    EKS_ENDPOINT=$(kubectl get service -n default your-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+    switch_dns_traffic "eks" "$EKS_ENDPOINT"
+fi
+
+# ECS 流量切換
+if [ -f "ecs_migration/alb_arn.txt" ]; then
+    ALB_ARN=$(cat ecs_migration/alb_arn.txt)
+    ECS_ENDPOINT=$(aws elbv2 describe-load-balancers \
+        --load-balancer-arns $ALB_ARN \
+        --query 'LoadBalancers[0].DNSName' \
+        --output text --region $TARGET_REGION)
+    switch_dns_traffic "ecs" "$ECS_ENDPOINT"
+fi
+
+# EC2 流量切換
+if [ -f "ec2_migration/alb_arn.txt" ]; then
+    ALB_ARN=$(cat ec2_migration/alb_arn.txt)
+    EC2_ENDPOINT=$(aws elbv2 describe-load-balancers \
+        --load-balancer-arns $ALB_ARN \
+        --query 'LoadBalancers[0].DNSName' \
+        --output text --region $TARGET_REGION)
+    switch_dns_traffic "ec2" "$EC2_ENDPOINT"
+fi
+
+echo "✅ 統一流量切換完成！"
+```
+
+## 🚨 緊急回滾
+
+### 統一回滾腳本
+
+```bash
+#!/bin/bash
+# emergency_rollback_all.sh
+source common_functions.sh
+load_config
+
+echo "🚨 執行統一緊急回滾..."
+
+# 回滾所有服務的 DNS 記錄
+emergency_rollback "eks" "$SOURCE_EKS_ENDPOINT"
+emergency_rollback "ecs" "$SOURCE_ECS_ENDPOINT"
+emergency_rollback "ec2" "$SOURCE_EC2_ENDPOINT"
+
+echo "✅ 統一緊急回滾完成！所有流量已切回 Tokyo Region"
+```
+
+## 📁 檔案組織建議
+
+建議的專案結構：
+
+```
+tpe-region-migration-guidance/
+├── README.md                           # 專案總覽
+├── tpe_migration.md                    # 架構設計指南
+├── tpe_migration_deployment.md         # 部署總覽（本檔案）
+├── common_functions.sh                 # 共用函數庫
+├── config.sh.example                   # 設定檔範本
+├── config.sh                          # 實際設定檔（使用者建立）
+├── generated-diagrams/                 # 架構圖目錄
+│   ├── eks_migration_architecture.png
+│   ├── ecs_migration_architecture.png
+│   └── ec2_migration_architecture.png
+├── eks_migration_deployment.md         # EKS 專用指南
+├── ecs_migration_deployment.md         # ECS 專用指南
+├── ec2_migration_deployment.md         # EC2 專用指南
+├── complete_mixed_migration.sh         # 混合環境遷移
+├── verify_all_migrations.sh           # 統一驗證
+├── switch_all_traffic.sh              # 統一流量切換
+└── emergency_rollback_all.sh           # 統一緊急回滾
+```
+
+## 🎯 使用建議
+
+### 單一服務遷移
+- 直接使用對應的專用部署指南
+- 例如：只有 EKS → 使用 `eks_migration_deployment.md`
+
+### 混合環境遷移
+- 使用本檔案提供的統一腳本
+- 可以並行處理多種服務
+
+### 大型企業環境
+- 建議分階段執行，先測試環境後生產環境
+- 使用統一的監控和回滾機制
+
+## 📞 支援資源
+
+- **架構設計問題**：參考 `tpe_migration.md`
+- **EKS 特定問題**：參考 `eks_migration_deployment.md`
+- **ECS 特定問題**：參考 `ecs_migration_deployment.md`
+- **EC2 特定問題**：參考 `ec2_migration_deployment.md`
+- **共用函數問題**：參考 `common_functions.sh` 中的說明
 
 ## 前置準備
 

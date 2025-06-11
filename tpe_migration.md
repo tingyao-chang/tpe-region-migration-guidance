@@ -322,6 +322,9 @@ Week 4: 測試和切換
 - **RBAC 和 IAM 整合**：權限設定的完整遷移
 
 #### 遷移架構
+
+![EKS Migration Architecture](./generated-diagrams/eks_migration_architecture.png)
+
 ```
 Tokyo EKS 叢集
     ↓ (設定匯出)
@@ -347,6 +350,9 @@ Kubernetes 資源遷移
 - **負載平衡整合**：ALB/NLB 的重新建立
 
 #### 遷移架構
+
+![ECS Migration Architecture](./generated-diagrams/ecs_migration_architecture.png)
+
 ```
 Tokyo ECS 服務
     ↓ (任務定義匯出)
@@ -372,6 +378,9 @@ Taipei ECS 服務
 - **彈性和擴展**：Auto Scaling 策略的重新設計
 
 #### 遷移架構
+
+![EC2 Migration Architecture](./generated-diagrams/ec2_migration_architecture.png)
+
 ```
 Tokyo EC2 執行個體
     ↓ (AMI 建立)
