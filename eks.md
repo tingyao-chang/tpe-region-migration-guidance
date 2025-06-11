@@ -2,44 +2,20 @@
 
 ## 概述
 
-本指南提供 EKS 叢集從 Tokyo Region → Taipei Region 遷移的具體執行命令和腳本。
+本指南專門針對 EKS 叢集從 Tokyo Region → Taipei Region 的遷移。
 
 ## 前置準備
 
-### 環境變數設定
+### 1. 基礎設施準備
+請先完成 `deployment.md` 中的共用基礎設施準備：
+- VPC 網路基礎設施
+- RDS 資料庫遷移（如需要）
+- ECR 映像複製
 
+### 2. EKS 特定設定
+確保 `config.sh` 中設定了：
 ```bash
-# 1. 複製設定檔範本
-cp config.sh.example config.sh
-
-# 2. 編輯 config.sh 填入實際值
-# 必要設定：
-# - CLUSTER_NAME: EKS 叢集名稱
-# - VPC_NAME: 目標區域的 VPC 名稱
-# 選用設定：
-# - DB_INSTANCE_ID: 如果有 RDS 資料庫需要遷移
-# - DOMAIN_NAME, HOSTED_ZONE_ID: 如果需要 DNS 流量切換
-
-# 3. 驗證設定
-./config.sh
-```
-
-### VPC 基礎設施準備
-
-```bash
-# 載入共用函數
-source common_functions.sh
-load_config
-validate_basic_config
-
-# 方案 A：複製來源區域 VPC 設定（推薦）
-./replicate_vpc_from_source.sh
-
-# 方案 B：建立全新 VPC
-./create_new_vpc.sh
-
-# 驗證 VPC 資源
-get_vpc_resources
+export CLUSTER_NAME="your-eks-cluster"
 ```
 
 ## EKS 遷移步驟
@@ -48,77 +24,291 @@ get_vpc_resources
 
 ```bash
 #!/bin/bash
-# export_eks_config.sh
-source common_functions.sh
-load_config
-validate_basic_config
-
-echo "📤 匯出 EKS 叢集設定..."
-
-# 驗證 EKS 特定設定
-if [[ -z "$CLUSTER_NAME" ]]; then
-    echo "❌ 錯誤：CLUSTER_NAME 未設定"
-    exit 1
-fi
-
-# 1. 匯出叢集基本設定
+# 匯出叢集基本設定
 aws eks describe-cluster \
   --name $CLUSTER_NAME \
   --region $SOURCE_REGION \
   --query 'cluster.{name:name,version:version,roleArn:roleArn,resourcesVpcConfig:resourcesVpcConfig,logging:logging,encryptionConfig:encryptionConfig,tags:tags}' \
   > eks-cluster-config.json
 
-echo "叢集設定已匯出到 eks-cluster-config.json"
-
-# 2. 匯出節點群組設定
+# 匯出節點群組設定
 aws eks list-nodegroups \
   --cluster-name $CLUSTER_NAME \
   --region $SOURCE_REGION \
   --query 'nodegroups' \
   --output text | while read nodegroup; do
-    echo "匯出節點群組: $nodegroup"
-    aws eks describe-nodegroup \
-      --cluster-name $CLUSTER_NAME \
-      --nodegroup-name $nodegroup \
-      --region $SOURCE_REGION \
-      --query 'nodegroup.{nodegroupName:nodegroupName,scalingConfig:scalingConfig,instanceTypes:instanceTypes,amiType:amiType,capacityType:capacityType,diskSize:diskSize,remoteAccess:remoteAccess,labels:labels,taints:taints,tags:tags}' \
-      > "nodegroup-${nodegroup}-config.json"
+    if [[ "$nodegroup" != "None" && -n "$nodegroup" ]]; then
+        aws eks describe-nodegroup \
+          --cluster-name $CLUSTER_NAME \
+          --nodegroup-name $nodegroup \
+          --region $SOURCE_REGION \
+          > "nodegroup-${nodegroup}-config.json"
+    fi
 done
 
-# 3. 匯出 Fargate 設定檔（如果有）
+# 匯出 Fargate 設定檔
 aws eks list-fargate-profiles \
   --cluster-name $CLUSTER_NAME \
   --region $SOURCE_REGION \
   --query 'fargateProfileNames' \
   --output text | while read profile; do
-    if [ "$profile" != "None" ]; then
-        echo "匯出 Fargate 設定檔: $profile"
+    if [[ "$profile" != "None" && -n "$profile" ]]; then
         aws eks describe-fargate-profile \
           --cluster-name $CLUSTER_NAME \
           --fargate-profile-name $profile \
           --region $SOURCE_REGION \
-          --query 'fargateProfile.{fargateProfileName:fargateProfileName,podExecutionRoleArn:podExecutionRoleArn,subnets:subnets,selectors:selectors,tags:tags}' \
           > "fargate-${profile}-config.json"
     fi
 done
 
-# 4. 匯出附加元件設定
+# 匯出附加元件設定
 aws eks list-addons \
   --cluster-name $CLUSTER_NAME \
   --region $SOURCE_REGION \
   --query 'addons' \
   --output text | while read addon; do
-    echo "匯出附加元件: $addon"
-    aws eks describe-addon \
+    if [[ "$addon" != "None" && -n "$addon" ]]; then
+        aws eks describe-addon \
+          --cluster-name $CLUSTER_NAME \
+          --addon-name $addon \
+          --region $SOURCE_REGION \
+          > "addon-${addon}-config.json"
+    fi
+done
+```
+
+### 2. 生成 EKS CloudFormation 模板
+
+```bash
+#!/bin/bash
+# 基於匯出的設定生成 CloudFormation 模板
+
+# 讀取叢集設定
+CLUSTER_CONFIG=$(cat eks-cluster-config.json)
+CLUSTER_VERSION=$(echo $CLUSTER_CONFIG | jq -r '.version')
+CLUSTER_ROLE_ARN=$(echo $CLUSTER_CONFIG | jq -r '.roleArn')
+
+# 獲取目標 VPC 資源
+TARGET_VPC_ID=$(aws cloudformation describe-stacks \
+    --stack-name vpc-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`VpcId`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+TARGET_PRIVATE_SUBNETS=$(aws cloudformation describe-stacks \
+    --stack-name vpc-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`PrivateSubnets`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+TARGET_PUBLIC_SUBNETS=$(aws cloudformation describe-stacks \
+    --stack-name vpc-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`PublicSubnets`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+# 生成 EKS CloudFormation 模板
+cat > eks-cluster-template.yaml << EOF
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EKS Cluster replicated from source region'
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: '$CLUSTER_NAME'
+  ClusterVersion:
+    Type: String
+    Default: '$CLUSTER_VERSION'
+  ServiceRoleArn:
+    Type: String
+    Default: '$CLUSTER_ROLE_ARN'
+
+Resources:
+  # EKS 叢集
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref ClusterVersion
+      RoleArn: !Ref ServiceRoleArn
+      ResourcesVpcConfig:
+        SubnetIds: 
+          - !Select [0, !Split [',', '$TARGET_PRIVATE_SUBNETS']]
+          - !Select [1, !Split [',', '$TARGET_PRIVATE_SUBNETS']]
+          - !Select [0, !Split [',', '$TARGET_PUBLIC_SUBNETS']]
+          - !Select [1, !Split [',', '$TARGET_PUBLIC_SUBNETS']]
+        SecurityGroupIds:
+          - !Ref EKSSecurityGroup
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+
+  # EKS 安全群組
+  EKSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EKS cluster
+      VpcId: $TARGET_VPC_ID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/8
+      Tags:
+        - Key: Name
+          Value: !Sub '\${ClusterName}-sg'
+
+Outputs:
+  ClusterName:
+    Description: 'EKS Cluster Name'
+    Value: !Ref EKSCluster
+  ClusterEndpoint:
+    Description: 'EKS Cluster Endpoint'
+    Value: !GetAtt EKSCluster.Endpoint
+  ClusterArn:
+    Description: 'EKS Cluster ARN'
+    Value: !GetAtt EKSCluster.Arn
+EOF
+
+# 部署 EKS 叢集
+aws cloudformation deploy \
+    --template-file eks-cluster-template.yaml \
+    --stack-name eks-cluster \
+    --parameter-overrides ClusterName=$CLUSTER_NAME \
+    --capabilities CAPABILITY_IAM \
+    --region $TARGET_REGION
+```
+
+### 3. 部署節點群組
+
+```bash
+#!/bin/bash
+# 為每個節點群組生成和部署 CloudFormation
+
+for nodegroup_file in nodegroup-*-config.json; do
+    if [ -f "$nodegroup_file" ]; then
+        NODEGROUP_NAME=$(basename "$nodegroup_file" -config.json | sed 's/nodegroup-//')
+        NODEGROUP_CONFIG=$(cat "$nodegroup_file")
+        
+        # 生成節點群組模板
+        cat > "nodegroup-${NODEGROUP_NAME}-template.yaml" << EOF
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EKS NodeGroup replicated from source region'
+
+Resources:
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: $CLUSTER_NAME
+      NodegroupName: $NODEGROUP_NAME
+      ScalingConfig:
+        MinSize: $(echo $NODEGROUP_CONFIG | jq -r '.scalingConfig.minSize')
+        MaxSize: $(echo $NODEGROUP_CONFIG | jq -r '.scalingConfig.maxSize')
+        DesiredSize: $(echo $NODEGROUP_CONFIG | jq -r '.scalingConfig.desiredSize')
+      InstanceTypes: $(echo $NODEGROUP_CONFIG | jq -c '.instanceTypes')
+      AmiType: $(echo $NODEGROUP_CONFIG | jq -r '.amiType')
+      CapacityType: $(echo $NODEGROUP_CONFIG | jq -r '.capacityType')
+      DiskSize: $(echo $NODEGROUP_CONFIG | jq -r '.diskSize')
+      NodeRole: $(echo $NODEGROUP_CONFIG | jq -r '.nodeRole')
+      Subnets:
+        - !Select [0, !Split [',', '$TARGET_PRIVATE_SUBNETS']]
+        - !Select [1, !Split [',', '$TARGET_PRIVATE_SUBNETS']]
+EOF
+        
+        # 部署節點群組
+        aws cloudformation deploy \
+            --template-file "nodegroup-${NODEGROUP_NAME}-template.yaml" \
+            --stack-name "eks-nodegroup-${NODEGROUP_NAME}" \
+            --capabilities CAPABILITY_IAM \
+            --region $TARGET_REGION
+    fi
+done
+```
+
+### 4. 遷移 Kubernetes 應用程式
+
+```bash
+#!/bin/bash
+# 匯出和遷移 Kubernetes 資源
+
+# 更新 kubeconfig 指向來源叢集
+aws eks update-kubeconfig --region $SOURCE_REGION --name $CLUSTER_NAME
+
+# 匯出應用程式資源
+kubectl get all,configmap,secret,pvc,ingress \
+  --all-namespaces \
+  --export -o yaml \
+  --ignore-not-found=true \
+  --field-selector metadata.namespace!=kube-system,metadata.namespace!=kube-public \
+  > k8s-resources-export.yaml
+
+# 修改映像路徑和資料庫連線
+sed "s/ap-northeast-1/ap-east-2/g" k8s-resources-export.yaml | \
+sed "s/${DB_INSTANCE_ID}/${DB_INSTANCE_ID}-taipei/g" > k8s-resources-modified.yaml
+
+# 更新 kubeconfig 指向目標叢集
+aws eks update-kubeconfig --region $TARGET_REGION --name $CLUSTER_NAME
+
+# 部署到目標叢集
+kubectl apply -f k8s-resources-modified.yaml
+```
+
+### 5. 驗證 EKS 遷移
+
+```bash
+#!/bin/bash
+# 驗證 EKS 遷移狀態
+
+echo "=== EKS 叢集狀態 ==="
+aws eks describe-cluster \
+  --name $CLUSTER_NAME \
+  --region $TARGET_REGION \
+  --query 'cluster.{Name:name,Status:status,Version:version,Endpoint:endpoint}'
+
+echo "=== 節點群組狀態 ==="
+aws eks list-nodegroups \
+  --cluster-name $CLUSTER_NAME \
+  --region $TARGET_REGION \
+  --query 'nodegroups' \
+  --output text | while read nodegroup; do
+    aws eks describe-nodegroup \
       --cluster-name $CLUSTER_NAME \
-      --addon-name $addon \
-      --region $SOURCE_REGION \
-      --query 'addon.{addonName:addonName,addonVersion:addonVersion,configurationValues:configurationValues,tags:tags}' \
-      > "addon-${addon}-config.json"
+      --nodegroup-name $nodegroup \
+      --region $TARGET_REGION \
+      --query 'nodegroup.{Name:nodegroupName,Status:status,DesiredSize:scalingConfig.desiredSize}'
 done
 
-echo "✅ EKS 叢集設定匯出完成！"
+echo "=== Pod 狀態 ==="
+kubectl get pods --all-namespaces --field-selector=status.phase!=Running
+
+echo "=== 服務端點 ==="
+kubectl get services --all-namespaces -o wide
 ```
+
+## 流量切換
+
+```bash
+#!/bin/bash
+# 獲取 EKS 服務端點並執行流量切換
+
+# 獲取 LoadBalancer 服務端點
+TARGET_ENDPOINT=$(kubectl get service -n default your-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+if [[ -n "$TARGET_ENDPOINT" && "$TARGET_ENDPOINT" != "null" ]]; then
+    # 執行流量切換（參考總覽指南中的 DNS 流量切換腳本）
+    echo "目標端點: $TARGET_ENDPOINT"
+    echo "請執行總覽指南中的 DNS 流量切換腳本"
+else
+    echo "❌ 無法獲取服務端點，請檢查 LoadBalancer 服務狀態"
+fi
+```
+
+## 注意事項
+
+1. **IAM 角色**：確保 EKS 服務角色和節點群組角色在目標區域有效
+2. **附加元件**：某些附加元件可能需要重新安裝
+3. **持久化儲存**：EBS 磁碟區需要額外處理
+4. **網路政策**：檢查安全群組和網路 ACL 設定
+5. **監控**：重新配置 CloudWatch Container Insights
 
 ### 2. 修改區域特定設定
 

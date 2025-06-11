@@ -12,12 +12,11 @@
 
 | 文件名稱 | 用途 | 目標讀者 |
 |---------|------|---------|
-| `tpe_migration.md` | 架構設計指南 | 架構師、技術主管 |
-| `tpe_migration_deployment.md` | **部署總覽指南** | 專案經理、DevOps 主管 |
-| `eks_migration_deployment.md` | EKS 專用部署指南 | Kubernetes 工程師 |
-| `ecs_migration_deployment.md` | ECS 專用部署指南 | 容器平台工程師 |
-| `ec2_migration_deployment.md` | EC2 專用部署指南 | 系統管理員 |
-| `common_functions.sh` | 共用函數庫 | 所有技術人員 |
+| `architecture.md` | 架構設計指南 | 架構師、技術主管 |
+| `deployment.md` | **部署總覽指南** | 專案經理、DevOps 主管 |
+| `eks.md` | EKS 專用部署指南 | Kubernetes 工程師 |
+| `ecs.md` | ECS 專用部署指南 | 容器平台工程師 |
+| `ec2.md` | EC2 專用部署指南 | 系統管理員 |
 | `config.sh.example` | 設定檔範本 | 所有使用者 |
 
 ### 🎨 架構圖
@@ -44,7 +43,7 @@
 
 > 💡 **提示**：如果您已經有 IaC 代碼，建議直接修改區域參數後重新部署，而不是使用本指南。
 
-### 1. `tpe_migration.md` - 架構設計指南
+### 1. `architecture.md` - 架構設計指南
 
 #### 🎯 **主要用途**
 - **遷移策略設計**：根據現有服務選擇最適合的遷移方法
@@ -64,7 +63,7 @@
 - **專案經理**：了解遷移複雜度和時程規劃
 - **企業架構師**：評估遷移對整體架構的影響
 
-### 2. `tpe_migration_deployment.md` - 部署總覽指南
+### 2. `deployment.md` - 部署總覽指南
 
 #### 🎯 **主要用途**
 - **統一協調**：協調 EKS、ECS、EC2 三種服務的遷移
@@ -87,32 +86,22 @@
 
 ### 3. 專用部署指南
 
-#### `eks_migration_deployment.md` - EKS 專用
+#### `eks.md` - EKS 專用
 - **目標讀者**：Kubernetes 工程師、容器平台團隊
 - **核心內容**：EKS 叢集設定匯出、節點群組遷移、Kubernetes 應用程式部署
 - **特殊功能**：Fargate 設定檔遷移、附加元件管理、kubectl 整合
 
-#### `ecs_migration_deployment.md` - ECS 專用
+#### `ecs.md` - ECS 專用
 - **目標讀者**：容器平台工程師、ECS 管理員
 - **核心內容**：任務定義匯出、服務配置遷移、負載平衡器設定
 - **特殊功能**：容量提供者策略、服務發現配置、ALB 整合
 
-#### `ec2_migration_deployment.md` - EC2 專用
+#### `ec2.md` - EC2 專用
 - **目標讀者**：系統管理員、基礎設施工程師
 - **核心內容**：AMI 建立複製、Auto Scaling 群組設定、啟動範本管理
 - **特殊功能**：User Data 腳本更新、執行個體健康檢查、擴展政策配置
 
-### 4. 共用模組
-
-#### `common_functions.sh` - 共用函數庫
-- **目標讀者**：所有技術人員
-- **核心功能**：
-  - VPC 資源管理和驗證
-  - 安全群組建立和規則設定
-  - ECR 跨區域複製自動化
-  - RDS 資料庫遷移（快照方式）
-  - DNS 流量切換和緊急回滾
-  - 統一的驗證和清理機制
+### 4. 設定檔
 
 #### `config.sh.example` - 設定檔範本
 - **目標讀者**：所有使用者
@@ -125,14 +114,14 @@
 ## 🚀 使用流程
 
 ### 階段 1：規劃設計 (Week 0)
-1. **閱讀架構指南**：`tpe_migration.md`
+1. **閱讀架構指南**：`architecture.md`
 2. **服務盤點分析**：評估現有 Tokyo Region 的服務配置
 3. **遷移策略選擇**：根據服務特性選擇適合的遷移方法
 4. **風險評估**：識別潛在風險和制定緩解措施
 
 ### 階段 2：準備執行 (Week 1)
 1. **環境準備**：設定 AWS CLI、kubectl、必要權限
-2. **腳本準備**：下載並配置 `tpe_migration_deployment.md` 中的腳本
+2. **腳本準備**：下載並配置 `deployment.md` 中的腳本
 3. **基礎設施建立**：在 Taipei Region 建立 VPC 等基礎資源
 4. **ECR 複製設定**：開始容器映像的背景同步
 
@@ -237,8 +226,8 @@
 ## 📞 支援與聯絡
 
 ### 技術支援
-- **架構設計問題**：參考 `tpe_migration.md`
-- **執行操作問題**：參考 `tpe_migration_deployment.md`
+- **架構設計問題**：參考 `architecture.md`
+- **執行操作問題**：參考 `deployment.md`
 - **故障排除**：檢查驗證腳本輸出
 
 ### 最佳實踐

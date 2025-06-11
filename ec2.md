@@ -2,79 +2,20 @@
 
 ## 概述
 
-本指南提供 EC2 執行個體從 Tokyo Region → Taipei Region 遷移的具體執行命令和腳本。
+本指南專門針對 EC2 執行個體從 Tokyo Region → Taipei Region 的遷移。
 
 ## 前置準備
 
-### 環境變數設定
+### 1. 基礎設施準備
+請先完成 `deployment.md` 中的共用基礎設施準備：
+- VPC 網路基礎設施
+- RDS 資料庫遷移（如需要）
 
+### 2. EC2 特定設定
+確保 `config.sh` 中設定了：
 ```bash
-#!/bin/bash
-# config.sh - 設定環境變數
-export SOURCE_REGION="ap-northeast-1"
-export TARGET_REGION="ap-east-2"
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export CLUSTER_NAME="your-cluster"
-export DB_INSTANCE_ID="your-db-instance"
-
-# VPC 相關設定
-export VPC_NAME="migration-vpc"
-export VPC_CIDR="10.0.0.0/16"
-
-# EC2 相關設定
-export INSTANCE_ID="i-1234567890abcdef0"  # 替換為實際的執行個體 ID
-export KEY_PAIR_NAME="my-key-pair"        # 替換為實際的金鑰對名稱
-
-# 驗證必要參數
-validate_config() {
-    local errors=()
-    
-    if [[ -z "$SOURCE_REGION" ]]; then
-        errors+=("SOURCE_REGION 未設定")
-    fi
-    
-    if [[ -z "$TARGET_REGION" ]]; then
-        errors+=("TARGET_REGION 未設定")
-    fi
-    
-    if [[ -z "$AWS_ACCOUNT_ID" ]]; then
-        errors+=("無法獲取 AWS_ACCOUNT_ID，請檢查 AWS CLI 設定")
-    fi
-    
-    if [[ -z "$INSTANCE_ID" ]]; then
-        errors+=("INSTANCE_ID 未設定")
-    fi
-    
-    if [[ -z "$KEY_PAIR_NAME" ]]; then
-        errors+=("KEY_PAIR_NAME 未設定")
-    fi
-    
-    if [[ ${#errors[@]} -gt 0 ]]; then
-        echo "❌ 設定錯誤："
-        printf '  - %s\n' "${errors[@]}"
-        exit 1
-    fi
-    
-    echo "✅ 設定驗證通過"
-}
-
-# 執行驗證
-validate_config
-
-# 載入設定
-source config.sh
-```
-
-### VPC 基礎設施準備
-
-請參考主要部署指南中的 VPC 準備步驟，或使用以下快速腳本：
-
-```bash
-# 複製來源區域 VPC 設定
-./replicate_vpc_from_source.sh
-
-# 或建立全新 VPC
-./create_new_vpc.sh
+export INSTANCE_ID="i-1234567890abcdef0"  # 要遷移的執行個體 ID
+export KEY_PAIR_NAME="my-key-pair"        # 金鑰對名稱
 ```
 
 ## EC2 遷移步驟
@@ -83,15 +24,10 @@ source config.sh
 
 ```bash
 #!/bin/bash
-# create_and_copy_ami.sh
-source config.sh
-
+# 從來源執行個體建立 AMI
 AMI_NAME="migration-ami-$(date +%Y%m%d-%H%M%S)"
 
-echo "🖼️ 建立和複製 AMI..."
-
-# 1. 從來源區域的 EC2 執行個體建立 AMI
-echo "建立 AMI 從執行個體 $INSTANCE_ID..."
+# 建立 AMI
 SOURCE_AMI_ID=$(aws ec2 create-image \
     --instance-id $INSTANCE_ID \
     --name "$AMI_NAME" \
@@ -103,14 +39,12 @@ SOURCE_AMI_ID=$(aws ec2 create-image \
 
 echo "來源 AMI ID: $SOURCE_AMI_ID"
 
-# 2. 等待 AMI 建立完成
-echo "⏳ 等待 AMI 建立完成..."
+# 等待 AMI 建立完成
 aws ec2 wait image-available \
     --image-ids $SOURCE_AMI_ID \
     --region $SOURCE_REGION
 
-# 3. 複製 AMI 到目標區域
-echo "複製 AMI 到目標區域..."
+# 複製 AMI 到目標區域
 TARGET_AMI_ID=$(aws ec2 copy-image \
     --source-image-id $SOURCE_AMI_ID \
     --source-region $SOURCE_REGION \
@@ -122,19 +56,272 @@ TARGET_AMI_ID=$(aws ec2 copy-image \
 
 echo "目標 AMI ID: $TARGET_AMI_ID"
 
-# 4. 儲存 AMI ID 供後續使用
-echo $TARGET_AMI_ID > target_ami_id.txt
-
-# 5. 等待 AMI 複製完成
-echo "⏳ 等待 AMI 複製完成..."
+# 等待 AMI 複製完成
 aws ec2 wait image-available \
     --image-ids $TARGET_AMI_ID \
     --region $TARGET_REGION
 
 echo "✅ AMI 建立和複製完成！"
-echo "來源 AMI ID: $SOURCE_AMI_ID"
-echo "目標 AMI ID: $TARGET_AMI_ID"
 ```
+
+### 2. 生成 EC2 CloudFormation 模板
+
+```bash
+#!/bin/bash
+# 基於 AMI 生成 CloudFormation 模板
+
+# 獲取目標 VPC 資源
+TARGET_VPC_ID=$(aws cloudformation describe-stacks \
+    --stack-name vpc-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`VpcId`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+TARGET_PRIVATE_SUBNETS=$(aws cloudformation describe-stacks \
+    --stack-name vpc-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`PrivateSubnets`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+TARGET_PUBLIC_SUBNETS=$(aws cloudformation describe-stacks \
+    --stack-name vpc-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`PublicSubnets`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+# 生成 EC2 CloudFormation 模板
+cat > ec2-infrastructure-template.yaml << EOF
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 Infrastructure replicated from source region'
+
+Parameters:
+  AMIId:
+    Type: String
+    Default: '$TARGET_AMI_ID'
+  KeyPairName:
+    Type: String
+    Default: '$KEY_PAIR_NAME'
+  InstanceType:
+    Type: String
+    Default: 't3.medium'
+
+Resources:
+  # EC2 安全群組
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 instances
+      VpcId: $TARGET_VPC_ID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/8
+      Tags:
+        - Key: Name
+          Value: ec2-app-sg
+
+  # 啟動範本
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: taipei-app-launch-template
+      LaunchTemplateData:
+        ImageId: !Ref AMIId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPairName
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            # 更新應用程式設定指向新的資料庫
+            sed -i 's/${DB_INSTANCE_ID}/${DB_INSTANCE_ID}-taipei/g' /etc/myapp/config.properties
+            systemctl restart myapp
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: taipei-app-instance
+              - Key: Environment
+                Value: production
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: taipei-ec2-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Select [0, !Split [',', '$TARGET_PUBLIC_SUBNETS']]
+        - !Select [1, !Split [',', '$TARGET_PUBLIC_SUBNETS']]
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  # ALB 安全群組
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: $TARGET_VPC_ID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # 目標群組
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: taipei-ec2-targets
+      Port: 80
+      Protocol: HTTP
+      VpcId: $TARGET_VPC_ID
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+
+  # ALB 監聽器
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Auto Scaling 群組
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: taipei-app-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 10
+      DesiredCapacity: 3
+      VPCZoneIdentifier:
+        - !Select [0, !Split [',', '$TARGET_PRIVATE_SUBNETS']]
+        - !Select [1, !Split [',', '$TARGET_PRIVATE_SUBNETS']]
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: taipei-app-asg-instance
+          PropagateAtLaunch: true
+
+  # Auto Scaling 政策
+  ScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0
+
+Outputs:
+  LoadBalancerDNS:
+    Description: 'Load Balancer DNS Name'
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  AutoScalingGroupName:
+    Description: 'Auto Scaling Group Name'
+    Value: !Ref AutoScalingGroup
+  LaunchTemplateId:
+    Description: 'Launch Template ID'
+    Value: !Ref LaunchTemplate
+EOF
+
+# 部署 EC2 基礎設施
+aws cloudformation deploy \
+    --template-file ec2-infrastructure-template.yaml \
+    --stack-name ec2-infrastructure \
+    --parameter-overrides AMIId=$TARGET_AMI_ID KeyPairName=$KEY_PAIR_NAME \
+    --capabilities CAPABILITY_IAM \
+    --region $TARGET_REGION
+```
+
+### 3. 驗證 EC2 部署
+
+```bash
+#!/bin/bash
+# 驗證 EC2 部署狀態
+
+echo "=== Auto Scaling 群組狀態 ==="
+aws autoscaling describe-auto-scaling-groups \
+    --auto-scaling-group-names taipei-app-asg \
+    --query 'AutoScalingGroups[0].{DesiredCapacity:DesiredCapacity,Instances:Instances[].{InstanceId:InstanceId,HealthStatus:HealthStatus,LifecycleState:LifecycleState}}' \
+    --region $TARGET_REGION
+
+echo "=== ALB 健康狀態 ==="
+TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups \
+    --names taipei-ec2-targets \
+    --query 'TargetGroups[0].TargetGroupArn' \
+    --output text --region $TARGET_REGION)
+
+aws elbv2 describe-target-health \
+    --target-group-arn $TARGET_GROUP_ARN \
+    --query 'TargetHealthDescriptions[].{Target:Target.Id,Health:TargetHealth.State}' \
+    --region $TARGET_REGION
+
+echo "=== 執行個體狀態 ==="
+INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+    --auto-scaling-group-names taipei-app-asg \
+    --query 'AutoScalingGroups[0].Instances[].InstanceId' \
+    --output text --region $TARGET_REGION)
+
+if [[ -n "$INSTANCE_IDS" ]]; then
+    aws ec2 describe-instances \
+        --instance-ids $INSTANCE_IDS \
+        --query 'Reservations[].Instances[].{InstanceId:InstanceId,State:State.Name,PrivateIpAddress:PrivateIpAddress}' \
+        --region $TARGET_REGION
+fi
+```
+
+## 流量切換
+
+```bash
+#!/bin/bash
+# 獲取 EC2 ALB 端點並執行流量切換
+
+TARGET_ENDPOINT=$(aws cloudformation describe-stacks \
+    --stack-name ec2-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerDNS`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+if [[ -n "$TARGET_ENDPOINT" && "$TARGET_ENDPOINT" != "None" ]]; then
+    echo "目標端點: $TARGET_ENDPOINT"
+    echo "請執行總覽指南中的 DNS 流量切換腳本"
+else
+    echo "❌ 無法獲取 ALB 端點"
+fi
+```
+
+## 注意事項
+
+1. **金鑰對**：確認目標區域有相同名稱的金鑰對
+2. **執行個體類型**：確認目標區域支援所選的執行個體類型
+3. **User Data**：根據實際應用程式調整 User Data 腳本
+4. **EBS 磁碟區**：額外的 EBS 磁碟區需要單獨處理
+5. **彈性 IP**：如需要，重新分配彈性 IP 地址
 
 ### 2. 設定 EC2 基礎設施
 

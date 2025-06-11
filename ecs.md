@@ -2,75 +2,20 @@
 
 ## 概述
 
-本指南提供 ECS 服務從 Tokyo Region → Taipei Region 遷移的具體執行命令和腳本。
+本指南專門針對 ECS 服務從 Tokyo Region → Taipei Region 的遷移。
 
 ## 前置準備
 
-### 環境變數設定
+### 1. 基礎設施準備
+請先完成 `deployment.md` 中的共用基礎設施準備：
+- VPC 網路基礎設施
+- RDS 資料庫遷移（如需要）
+- ECR 映像複製
 
+### 2. ECS 特定設定
+確保 `config.sh` 中設定了：
 ```bash
-#!/bin/bash
-# config.sh - 設定環境變數
-export SOURCE_REGION="ap-northeast-1"
-export TARGET_REGION="ap-east-2"
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export CLUSTER_NAME="your-cluster"
-export DB_INSTANCE_ID="your-db-instance"
-
-# VPC 相關設定
-export VPC_NAME="migration-vpc"
-export VPC_CIDR="10.0.0.0/16"
-
-# 驗證必要參數
-validate_config() {
-    local errors=()
-    
-    if [[ -z "$SOURCE_REGION" ]]; then
-        errors+=("SOURCE_REGION 未設定")
-    fi
-    
-    if [[ -z "$TARGET_REGION" ]]; then
-        errors+=("TARGET_REGION 未設定")
-    fi
-    
-    if [[ -z "$AWS_ACCOUNT_ID" ]]; then
-        errors+=("無法獲取 AWS_ACCOUNT_ID，請檢查 AWS CLI 設定")
-    fi
-    
-    if [[ -z "$CLUSTER_NAME" ]]; then
-        errors+=("CLUSTER_NAME 未設定")
-    fi
-    
-    if [[ -z "$DB_INSTANCE_ID" ]]; then
-        errors+=("DB_INSTANCE_ID 未設定")
-    fi
-    
-    if [[ ${#errors[@]} -gt 0 ]]; then
-        echo "❌ 設定錯誤："
-        printf '  - %s\n' "${errors[@]}"
-        exit 1
-    fi
-    
-    echo "✅ 設定驗證通過"
-}
-
-# 執行驗證
-validate_config
-
-# 載入設定
-source config.sh
-```
-
-### VPC 基礎設施準備
-
-請參考主要部署指南中的 VPC 準備步驟，或使用以下快速腳本：
-
-```bash
-# 複製來源區域 VPC 設定
-./replicate_vpc_from_source.sh
-
-# 或建立全新 VPC
-./create_new_vpc.sh
+export CLUSTER_NAME="your-ecs-cluster"
 ```
 
 ## ECS 遷移步驟
@@ -79,60 +24,299 @@ source config.sh
 
 ```bash
 #!/bin/bash
-# export_ecs_config.sh
-source config.sh
-
-echo "📤 匯出 ECS 叢集設定..."
-
-# 1. 匯出叢集設定
+# 匯出叢集設定
 aws ecs describe-clusters \
   --clusters $CLUSTER_NAME \
   --region $SOURCE_REGION \
   --query 'clusters[0].{clusterName:clusterName,tags:tags,settings:settings,configuration:configuration}' \
   > ecs-cluster-config.json
 
-echo "叢集設定已匯出到 ecs-cluster-config.json"
-
-# 2. 匯出所有服務設定
+# 匯出所有服務設定
 aws ecs list-services \
   --cluster $CLUSTER_NAME \
   --region $SOURCE_REGION \
   --query 'serviceArns' \
   --output text | while read service_arn; do
     service_name=$(basename $service_arn)
-    echo "匯出服務: $service_name"
-    
     aws ecs describe-services \
       --cluster $CLUSTER_NAME \
       --services $service_arn \
       --region $SOURCE_REGION \
-      --query 'services[0].{serviceName:serviceName,taskDefinition:taskDefinition,desiredCount:desiredCount,launchType:launchType,capacityProviderStrategy:capacityProviderStrategy,networkConfiguration:networkConfiguration,loadBalancers:loadBalancers,serviceRegistries:serviceRegistries,tags:tags,enableExecuteCommand:enableExecuteCommand}' \
       > "service-${service_name}-config.json"
 done
 
-# 3. 匯出所有任務定義
+# 匯出所有任務定義
 aws ecs list-task-definitions \
   --region $SOURCE_REGION \
   --query 'taskDefinitionArns' \
   --output text | while read taskdef_arn; do
     taskdef_name=$(echo $taskdef_arn | cut -d'/' -f2 | cut -d':' -f1)
-    echo "匯出任務定義: $taskdef_name"
-    
     aws ecs describe-task-definition \
       --task-definition $taskdef_arn \
       --region $SOURCE_REGION \
-      --query 'taskDefinition.{family:family,taskRoleArn:taskRoleArn,executionRoleArn:executionRoleArn,networkMode:networkMode,requiresCompatibilities:requiresCompatibilities,cpu:cpu,memory:memory,containerDefinitions:containerDefinitions,volumes:volumes,placementConstraints:placementConstraints,tags:tags}' \
       > "taskdef-${taskdef_name}-config.json"
 done
-
-# 4. 匯出容量提供者設定
-aws ecs describe-capacity-providers \
-  --region $SOURCE_REGION \
-  --query 'capacityProviders[].{name:name,autoScalingGroupProvider:autoScalingGroupProvider,tags:tags}' \
-  > capacity-providers-config.json
-
-echo "✅ ECS 叢集設定匯出完成！"
 ```
+
+### 2. 生成 ECS CloudFormation 模板
+
+```bash
+#!/bin/bash
+# 基於匯出的設定生成 CloudFormation 模板
+
+# 獲取目標 VPC 資源
+TARGET_VPC_ID=$(aws cloudformation describe-stacks \
+    --stack-name vpc-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`VpcId`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+TARGET_PRIVATE_SUBNETS=$(aws cloudformation describe-stacks \
+    --stack-name vpc-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`PrivateSubnets`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+TARGET_PUBLIC_SUBNETS=$(aws cloudformation describe-stacks \
+    --stack-name vpc-infrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`PublicSubnets`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+# 生成 ECS CloudFormation 模板
+cat > ecs-cluster-template.yaml << EOF
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS Cluster replicated from source region'
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: '$CLUSTER_NAME'
+
+Resources:
+  # ECS 叢集
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+  # ECS 安全群組
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS services
+      VpcId: $TARGET_VPC_ID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/8
+      Tags:
+        - Key: Name
+          Value: !Sub '\${ClusterName}-sg'
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '\${ClusterName}-alb'
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Select [0, !Split [',', '$TARGET_PUBLIC_SUBNETS']]
+        - !Select [1, !Split [',', '$TARGET_PUBLIC_SUBNETS']]
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  # ALB 安全群組
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: $TARGET_VPC_ID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  # 目標群組
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '\${ClusterName}-targets'
+      Port: 80
+      Protocol: HTTP
+      VpcId: $TARGET_VPC_ID
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+
+  # ALB 監聽器
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+Outputs:
+  ClusterName:
+    Description: 'ECS Cluster Name'
+    Value: !Ref ECSCluster
+  LoadBalancerDNS:
+    Description: 'Load Balancer DNS Name'
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  TargetGroupArn:
+    Description: 'Target Group ARN'
+    Value: !Ref TargetGroup
+  SecurityGroupId:
+    Description: 'ECS Security Group ID'
+    Value: !Ref ECSSecurityGroup
+EOF
+
+# 部署 ECS 叢集
+aws cloudformation deploy \
+    --template-file ecs-cluster-template.yaml \
+    --stack-name ecs-cluster \
+    --parameter-overrides ClusterName=$CLUSTER_NAME \
+    --capabilities CAPABILITY_IAM \
+    --region $TARGET_REGION
+```
+
+### 3. 註冊任務定義和建立服務
+
+```bash
+#!/bin/bash
+# 處理任務定義和服務
+
+# 獲取 CloudFormation 輸出
+TARGET_SECURITY_GROUP_ID=$(aws cloudformation describe-stacks \
+    --stack-name ecs-cluster \
+    --query 'Stacks[0].Outputs[?OutputKey==`SecurityGroupId`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+TARGET_GROUP_ARN=$(aws cloudformation describe-stacks \
+    --stack-name ecs-cluster \
+    --query 'Stacks[0].Outputs[?OutputKey==`TargetGroupArn`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+# 註冊任務定義
+for taskdef_file in taskdef-*-config.json; do
+    if [ -f "$taskdef_file" ]; then
+        # 修改容器映像 URI 和環境變數
+        jq '.taskDefinition | 
+            .containerDefinitions[].image |= sub("ap-northeast-1"; "ap-east-2") |
+            .containerDefinitions[].environment[]? |= if .name == "DB_HOST" then .value |= sub("'$DB_INSTANCE_ID'"; "'$DB_INSTANCE_ID'-taipei") else . end |
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy)' \
+           "$taskdef_file" > "${taskdef_file%.json}-modified.json"
+        
+        # 註冊任務定義
+        aws ecs register-task-definition \
+          --region $TARGET_REGION \
+          --cli-input-json file://"${taskdef_file%.json}-modified.json"
+    fi
+done
+
+# 建立服務
+for service_file in service-*-config.json; do
+    if [ -f "$service_file" ]; then
+        SERVICE_CONFIG=$(cat "$service_file")
+        SERVICE_NAME=$(echo $SERVICE_CONFIG | jq -r '.serviceName')
+        TASK_DEFINITION=$(echo $SERVICE_CONFIG | jq -r '.taskDefinition' | cut -d':' -f1)
+        
+        # 建立服務
+        aws ecs create-service \
+          --region $TARGET_REGION \
+          --cluster $CLUSTER_NAME \
+          --service-name $SERVICE_NAME \
+          --task-definition $TASK_DEFINITION \
+          --desired-count $(echo $SERVICE_CONFIG | jq -r '.desiredCount') \
+          --launch-type FARGATE \
+          --network-configuration "awsvpcConfiguration={subnets=[$TARGET_PRIVATE_SUBNETS],securityGroups=[$TARGET_SECURITY_GROUP_ID],assignPublicIp=DISABLED}" \
+          --load-balancers "targetGroupArn=$TARGET_GROUP_ARN,containerName=web,containerPort=80"
+    fi
+done
+```
+
+### 4. 驗證 ECS 遷移
+
+```bash
+#!/bin/bash
+# 驗證 ECS 遷移狀態
+
+echo "=== ECS 叢集狀態 ==="
+aws ecs describe-clusters \
+    --clusters $CLUSTER_NAME \
+    --region $TARGET_REGION \
+    --query 'clusters[0].{Name:clusterName,Status:status,ActiveServicesCount:activeServicesCount,RunningTasksCount:runningTasksCount}'
+
+echo "=== ECS 服務狀態 ==="
+aws ecs list-services \
+    --cluster $CLUSTER_NAME \
+    --region $TARGET_REGION \
+    --query 'serviceArns' \
+    --output text | while read service_arn; do
+    service_name=$(basename $service_arn)
+    aws ecs describe-services \
+        --cluster $CLUSTER_NAME \
+        --services $service_arn \
+        --region $TARGET_REGION \
+        --query 'services[0].{Name:serviceName,Status:status,DesiredCount:desiredCount,RunningCount:runningCount}'
+done
+
+echo "=== ALB 健康狀態 ==="
+TARGET_GROUP_ARN=$(aws cloudformation describe-stacks \
+    --stack-name ecs-cluster \
+    --query 'Stacks[0].Outputs[?OutputKey==`TargetGroupArn`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+aws elbv2 describe-target-health \
+    --target-group-arn $TARGET_GROUP_ARN \
+    --region $TARGET_REGION \
+    --query 'TargetHealthDescriptions[].{Target:Target.Id,Health:TargetHealth.State}'
+```
+
+## 流量切換
+
+```bash
+#!/bin/bash
+# 獲取 ECS ALB 端點並執行流量切換
+
+TARGET_ENDPOINT=$(aws cloudformation describe-stacks \
+    --stack-name ecs-cluster \
+    --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerDNS`].OutputValue' \
+    --output text --region $TARGET_REGION)
+
+if [[ -n "$TARGET_ENDPOINT" && "$TARGET_ENDPOINT" != "None" ]]; then
+    echo "目標端點: $TARGET_ENDPOINT"
+    echo "請執行總覽指南中的 DNS 流量切換腳本"
+else
+    echo "❌ 無法獲取 ALB 端點"
+fi
+```
+
+## 注意事項
+
+1. **任務角色**：確保任務執行角色和任務角色在目標區域有效
+2. **服務發現**：如使用 Service Discovery，需要重新配置
+3. **容量提供者**：檢查 Fargate 和 EC2 容量提供者設定
+4. **日誌**：重新配置 CloudWatch Logs 群組
+5. **秘密管理**：確保 Secrets Manager 和 Parameter Store 可訪問
 
 ### 2. 部署 ECS 叢集
 
