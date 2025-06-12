@@ -1,243 +1,259 @@
-# AWS 跨區域工作負載遷移指南
-
-> **本專案所有內容皆由 Amazon Q Developer CLI 搭配 MCP (Model Context Protocol) 產生**
+# AWS 跨區域遷移指南：Tokyo Region 到 Taipei Region
 
 ## 概述
 
-本專案提供完整的 AWS 跨區域工作負載遷移解決方案，專門針對從 **Tokyo Region (ap-northeast-1)** 遷移到 **Taipei Region (ap-east-2)** 的場景設計。包含架構設計指南和具體執行腳本，支援 EKS、ECS、EC2 三種主要計算服務的遷移。
+本指南提供從 Tokyo Region (ap-northeast-1) 遷移到 Taipei Region (ap-east-2) 的完整策略，主要針對使用 Amazon EKS、Amazon RDS 和 Amazon ECR 的客戶。
 
-## 文件結構
+## 遷移架構圖
 
-### 📋 核心文件
+![完整遷移架構](./generated-diagrams/complete_migration_architecture.png)
 
-| 文件名稱 | 用途 | 目標讀者 |
-|---------|------|---------|
-| `architecture.md` | 架構設計指南 | 架構師、技術主管 |
-| `deployment.md` | **部署總覽指南** | 專案經理、DevOps 主管 |
-| `eks.md` | EKS 專用部署指南 | Kubernetes 工程師 |
-| `ecs.md` | ECS 專用部署指南 | 容器平台工程師 |
-| `ec2.md` | EC2 專用部署指南 | 系統管理員 |
-| `config.sh.example` | 設定檔範本 | 所有使用者 |
+## 適用客戶條件
 
-### 🎨 架構圖
+### ✅ 最適合的客戶特徵
 
-| 圖檔名稱 | 說明 | 位置 |
-|---------|------|------|
-| `eks_migration_architecture.png` | EKS 遷移架構圖 | `generated-diagrams/` |
-| `ecs_migration_architecture.png` | ECS 遷移架構圖 | `generated-diagrams/` |
-| `ec2_migration_architecture.png` | EC2 遷移架構圖 | `generated-diagrams/` |
+**技術架構**：
+- 使用 Amazon EKS + Amazon RDS + Amazon ECR 的組合架構
+- 手動透過 AWS Console 或 AWS CLI 建立的服務
+- 缺乏完整的 AWS CloudFormation 或 AWS CDK 管理
+- 已在 Tokyo Region 使用多可用區部署
 
-## 📖 文件詳細說明
+**業務需求**：
+- 需要完全一致的配置複製到新區域
+- 要求最小停機時間（RTO < 30分鐘）
+- 資料遺失容忍度低（RPO < 15分鐘）
+- 有明確的遷移時間窗口
 
-### 🎯 **適用條件**
+**組織能力**：
+- 具備 AWS CLI 和 kubectl 操作經驗
+- 有 24/7 監控和應急響應能力
+- 能承受 1-2 週的雙重環境成本
+- 有測試環境可以先行驗證
 
-本專案特別適合以下場景：
-- **非 IaC 管理的現有環境**：手動建立的 AWS 服務，缺乏完整的基礎設施即代碼
-- **需要完全一致性複製**：要求新區域與現有區域的配置完全相同
-- **緊急遷移需求**：因區域服務中斷、法規要求或成本最佳化需要快速遷移
+### ❌ 不適用的客戶類型
 
-**不適用場景**：
-- 已有完整 Terraform、CloudFormation 或 CDK 代碼管理的環境
-- 完全容器化且有完整部署腳本的應用程式
-- 採用微服務架構且每個服務都有獨立部署管道的系統
+- 已完全使用 AWS CloudFormation 或 AWS CDK 管理基礎設施
+- 純 Serverless 架構（AWS Lambda + Amazon API Gateway + Amazon DynamoDB）
+- 只使用單一 AWS 服務的簡單架構
+- 缺乏 Kubernetes 和容器技術經驗
 
-> 💡 **提示**：如果您已經有 IaC 代碼，建議直接修改區域參數後重新部署，而不是使用本指南。
+## 遷移策略
 
-### 1. `architecture.md` - 架構設計指南
+### 1. Amazon RDS 遷移策略
 
-#### 🎯 **主要用途**
-- **遷移策略設計**：根據現有服務選擇最適合的遷移方法
-- **架構決策支援**：提供技術決策的依據和考量因素
-- **風險評估分析**：識別潛在風險和緩解策略
-- **成本最佳化規劃**：遷移期間和長期的成本控制策略
+**推薦方法**：多層次備份 + AWS DMS 持續同步
 
-#### 📚 **核心內容**
-- **遷移方法分類**：設定匯出型、資源複製型、混合型遷移
-- **服務遷移策略**：EKS、ECS、EC2、RDS 的具體遷移設計
-- **遷移順序規劃**：4 週遷移時程和並行處理策略
-- **架構考量要素**：網路、安全、監控、災難恢復設計
+**技術實作**：
+```bash
+# 1. 設定 AWS Backup 跨區域備份
+aws backup create-backup-plan \
+  --backup-plan BackupPlanName="RDS-CrossRegion-Migration" \
+  --region ap-northeast-1
 
-#### 👥 **適用對象**
-- **解決方案架構師**：設計整體遷移架構
-- **技術主管**：制定遷移策略和決策
-- **專案經理**：了解遷移複雜度和時程規劃
-- **企業架構師**：評估遷移對整體架構的影響
+# 2. 配置跨區域快照複製
+aws rds modify-db-instance \
+  --db-instance-identifier tokyo-db \
+  --backup-retention-period 7 \
+  --copy-tags-to-snapshot \
+  --region ap-northeast-1
 
-### 2. `deployment.md` - 部署總覽指南
+# 3. AWS DMS 持續複製設定
+aws dms create-replication-instance \
+  --replication-instance-identifier migration-instance \
+  --replication-instance-class dms.t3.medium \
+  --allocated-storage 100 \
+  --region ap-east-2
+```
 
-#### 🎯 **主要用途**
-- **統一協調**：協調 EKS、ECS、EC2 三種服務的遷移
-- **混合環境支援**：支援包含多種服務的複雜環境遷移
-- **共用資源管理**：統一管理 VPC、ECR、RDS 等共用資源
-- **流程標準化**：提供標準化的遷移流程和最佳實踐
+**預期指標**：
+- **RPO**: 5-15 分鐘（透過 AWS DMS 持續同步）
+- **RTO**: 15-30 分鐘（自動化切換）
 
-#### 📚 **核心內容**
-- **快速開始指南**：統一的環境準備和設定流程
-- **服務選擇指引**：根據服務類型選擇對應的專用指南
-- **混合環境遷移**：並行處理多種服務的遷移策略
-- **統一監控驗證**：跨服務的狀態監控和驗證機制
-- **流量切換協調**：統一的 DNS 流量切換和回滾機制
+### 2. Amazon EKS 遷移策略
 
-#### 👥 **適用對象**
-- **專案經理**：了解整體遷移進度和協調
-- **DevOps 主管**：統籌多服務遷移的執行
-- **架構師**：設計混合環境的遷移策略
-- **技術主管**：監控和驗證遷移結果
+**推薦方法**：配置即代碼 + 應用程式狀態遷移
 
-### 3. 專用部署指南
+**技術實作**：
+```bash
+# 1. 匯出完整叢集配置
+eksctl utils write-kubeconfig --cluster tokyo-cluster --region ap-northeast-1
+kubectl get all --all-namespaces -o yaml > cluster-backup.yaml
 
-#### `eks.md` - EKS 專用
-- **目標讀者**：Kubernetes 工程師、容器平台團隊
-- **核心內容**：EKS 叢集設定匯出、節點群組遷移、Kubernetes 應用程式部署
-- **特殊功能**：Fargate 設定檔遷移、附加元件管理、kubectl 整合
+# 2. 使用 eksctl 配置檔重建
+eksctl create cluster --config-file=taipei-cluster-config.yaml --region ap-east-2
 
-#### `ecs.md` - ECS 專用
-- **目標讀者**：容器平台工程師、ECS 管理員
-- **核心內容**：任務定義匯出、服務配置遷移、負載平衡器設定
-- **特殊功能**：容量提供者策略、服務發現配置、ALB 整合
+# 3. 應用程式部署
+kubectl apply -f cluster-backup.yaml --region ap-east-2
+```
 
-#### `ec2.md` - EC2 專用
-- **目標讀者**：系統管理員、基礎設施工程師
-- **核心內容**：AMI 建立複製、Auto Scaling 群組設定、啟動範本管理
-- **特殊功能**：User Data 腳本更新、執行個體健康檢查、擴展政策配置
+### 3. Amazon ECR 遷移策略
 
-### 4. 設定檔
+**推薦方法**：ECR 跨區域自動複製
 
-#### `config.sh.example` - 設定檔範本
-- **目標讀者**：所有使用者
-- **核心功能**：
-  - 統一的環境變數管理
-  - 自動設定驗證和錯誤檢查
-  - 服務特定參數的條件設定
-  - 設定摘要和說明文件
+**複製配置**：
+```json
+{
+  "rules": [
+    {
+      "destinations": [
+        {
+          "region": "ap-east-2",
+          "registryId": "123456789012"
+        }
+      ],
+      "repositoryFilters": [
+        {
+          "filter": "*",
+          "filterType": "PREFIX_MATCH"
+        }
+      ]
+    }
+  ]
+}
+```
 
-## 🚀 使用流程
+**現有映像遷移**：
+```bash
+# 設定 ECR 複製規則
+aws ecr put-replication-configuration \
+  --replication-configuration file://replication-config.json \
+  --region ap-northeast-1
 
-### 階段 1：規劃設計 (Week 0)
-1. **閱讀架構指南**：`architecture.md`
-2. **服務盤點分析**：評估現有 Tokyo Region 的服務配置
-3. **遷移策略選擇**：根據服務特性選擇適合的遷移方法
-4. **風險評估**：識別潛在風險和制定緩解措施
+# 手動觸發現有映像複製
+for repo in $(aws ecr describe-repositories --region ap-northeast-1 --query 'repositories[].repositoryName' --output text); do
+  aws ecr batch-get-image --repository-name $repo --region ap-northeast-1 \
+    --image-ids imageTag=latest --query 'images[].imageManifest' --output text | \
+  aws ecr put-image --repository-name $repo --region ap-east-2 \
+    --image-manifest file:///dev/stdin --image-tag latest
+done
+```
 
-### 階段 2：準備執行 (Week 1)
-1. **環境準備**：設定 AWS CLI、kubectl、必要權限
-2. **腳本準備**：下載並配置 `deployment.md` 中的腳本
-3. **基礎設施建立**：在 Taipei Region 建立 VPC 等基礎資源
-4. **ECR 複製設定**：開始容器映像的背景同步
+## 遷移時程規劃
 
-### 階段 3：執行遷移 (Week 2-4)
-1. **計算服務遷移**：執行 EKS/ECS/EC2 叢集建立
-2. **資料庫遷移**：RDS 快照 + DMS 差異同步
-3. **應用程式部署**：部署應用程式到新的計算環境
-4. **測試驗證**：功能測試、效能測試、安全測試
+### 第 0 週：規劃與準備
+- [ ] 災難恢復需求評估（RTO/RPO）
+- [ ] 依賴關係分析和風險評估
+- [ ] Amazon ECR 複製規則配置（提前開始背景同步）
+- [ ] 測試環境建立和驗證
 
-### 階段 4：切換上線 (Week 4)
-1. **流量切換**：使用 Route 53 漸進式切換流量
-2. **監控觀察**：密切監控系統狀態和效能指標
-3. **最佳化調整**：根據實際運行情況進行調整
-4. **文件更新**：更新運維文件和架構圖
+### 第 1 週：基礎設施準備
+- [ ] Taipei Region 基礎網路建立（Amazon VPC、子網路）
+- [ ] IAM 角色和安全群組配置
+- [ ] Amazon ECR 複製驗證
+- [ ] AWS DMS 複製執行個體建立
 
-## 🛠️ 技術要求
+### 第 2 週：資料庫遷移執行
+- [ ] Amazon RDS 快照建立和跨區域復原
+- [ ] AWS DMS 複製任務啟動和監控
+- [ ] 資料一致性驗證
+- [ ] 效能基準測試
 
-### 必要工具
-- **AWS CLI** (v2.0+)：AWS 服務操作
-- **kubectl** (v1.24+)：Kubernetes 叢集管理
-- **jq** (v1.6+)：JSON 資料處理
-- **bash** (v4.0+)：腳本執行環境
+### 第 3 週：EKS 叢集建立與應用部署
+- [ ] Amazon EKS 叢集建立
+- [ ] 應用程式配置部署
+- [ ] 服務發現和負載平衡配置
+- [ ] 功能和整合測試
 
-### 必要權限
-- **EC2 完整權限**：AMI、執行個體、VPC 管理
-- **EKS 完整權限**：叢集和節點群組管理
-- **ECS 完整權限**：叢集、服務、任務定義管理
-- **RDS 完整權限**：資料庫、快照管理
-- **DMS 完整權限**：複製執行個體和任務管理
-- **ECR 完整權限**：映像複製和管理
-- **Route 53 權限**：DNS 記錄管理
-- **IAM 權限**：角色和政策管理
+### 第 4 週：流量切換與驗證
+- [ ] Amazon Route 53 DNS 記錄準備
+- [ ] 漸進式流量切換（10% → 50% → 100%）
+- [ ] 監控和效能驗證
+- [ ] 完成遷移確認
 
-## 📊 支援的遷移場景
+## 監控與驗證
 
-### 計算服務遷移
-| 來源服務 | 遷移方法 | 停機時間 | 複雜度 |
-|---------|---------|---------|--------|
-| **EKS 叢集** | 設定匯出 + 重建 | 0（新叢集） | 中等 |
-| **ECS 叢集** | 設定匯出 + 重建 | 0（新叢集） | 中等 |
-| **EC2 執行個體** | AMI 複製 + 重建 | 應用切換時間 | 簡單 |
+### Amazon RDS 遷移監控
+```bash
+# AWS DMS 任務狀態監控
+aws dms describe-replication-tasks \
+  --filters Name=replication-task-id,Values=task-id \
+  --region ap-east-2
 
-### 資料服務遷移
-| 來源服務 | 遷移方法 | 停機時間 | 複雜度 |
-|---------|---------|---------|--------|
-| **RDS 資料庫** | 快照 + DMS 同步 | 5-30 分鐘 | 中等 |
-| **ECR 映像** | 跨區域複製 | 0（背景同步） | 簡單 |
+# 資料一致性檢查
+aws rds describe-db-instances \
+  --db-instance-identifier taipei-db \
+  --region ap-east-2
+```
 
-## 🎯 核心特色
+### Amazon EKS 健康檢查
+```bash
+# 叢集狀態驗證
+kubectl get nodes --show-labels
+kubectl get pods --all-namespaces
+kubectl get services --all-namespaces
+```
 
-### 1. **設定完全一致性**
-- 完整匯出現有服務配置
-- 只修改區域特定參數
-- 確保 100% 配置一致性
+### Amazon ECR 同步狀態
+```bash
+# 複製狀態檢查
+aws ecr describe-registry --region ap-east-2 \
+  --query 'replicationConfiguration.rules[].destinations[].region'
 
-### 2. **高度自動化**
-- 一鍵執行完整遷移
-- 自動化驗證和健康檢查
-- 智慧化錯誤處理和重試
+# 映像完整性驗證
+aws ecr describe-images --repository-name app-repo --region ap-east-2
+```
 
-### 3. **最小停機時間**
-- 並行處理策略
-- DMS 差異同步技術
-- 漸進式流量切換
+## 成本最佳化
 
-### 4. **完整風險控制**
-- 多重備份機制
-- 快速回滾能力
-- 全面監控和警示
+### 預期成本項目
+- **Amazon ECR 複製**：跨區域資料傳輸 $0.02/GB + 雙重儲存成本
+- **AWS DMS**：複製執行個體按小時計費 + 跨區域資料傳輸
+- **雙重環境**：1-2 週並行運行成本
 
-## 📈 預期效益
+### 最佳化建議
+- 使用 VPC Peering 降低資料傳輸成本
+- 選擇適當的 AWS DMS 執行個體大小
+- 遷移完成後及時清理暫時資源
+- 考慮使用 Amazon EC2 Spot 執行個體進行測試
 
-### 時間效益
-- **傳統方法**：2-4 週手動操作
-- **本方案**：1-2 週自動化執行
-- **效率提升**：50-75%
+## 風險控制與回滾策略
 
-### 成本效益
-- **減少人力成本**：自動化減少專家需求
-- **降低錯誤成本**：避免配置錯誤重做
-- **最佳化資源使用**：並行處理減少資源重疊
+### 快速回滾機制
+```bash
+# Amazon Route 53 DNS 快速切回
+aws route53 change-resource-record-sets \
+  --hosted-zone-id Z123456789 \
+  --change-batch file://rollback-changeset.json
+```
 
-### 風險控制
-- **配置一致性**：100% 保證
-- **資料完整性**：多重驗證機制
-- **快速恢復**：15 分鐘內完成回滾
+### 資料一致性保證
+- AWS DMS 雙向同步配置
+- 15 分鐘內完成流量切回
+- 多重備份機制確保資料安全
 
-## 🤝 貢獻指南
+### 風險緩解措施
+- 完整的測試環境驗證
+- 分階段流量切換
+- 24/7 監控和告警機制
+- 詳細的回滾程序文件
 
-### 問題回報
-如發現問題或有改進建議，請：
-1. 檢查現有 Issues
-2. 建立詳細的問題描述
-3. 提供重現步驟和環境資訊
+## 成功指標
 
-### 功能請求
-歡迎提出新功能需求：
-1. 描述使用場景
-2. 說明預期效益
-3. 提供實作建議
+### 技術指標
+- **RTO 達成**：< 30 分鐘
+- **RPO 達成**：< 15 分鐘
+- **配置一致性**：100% 相同
+- **應用程式可用性**：99.9%+
 
-## 📞 支援與聯絡
+### 業務指標
+- **遷移時程**：4 週內完成
+- **成本控制**：預算範圍內
+- **零資料遺失**：確保資料完整性
+- **使用者體驗**：無感知切換
 
-### 技術支援
-- **架構設計問題**：參考 `architecture.md`
-- **執行操作問題**：參考 `deployment.md`
-- **故障排除**：檢查驗證腳本輸出
+## 支援資源
 
-### 最佳實踐
-- **測試環境先行**：在測試環境完整驗證後再執行生產遷移
-- **備份策略**：確保所有重要資料都有完整備份
-- **監控準備**：設定完整的監控和警示機制
-- **團隊協作**：確保所有相關團隊了解遷移計畫和應急程序
+### AWS 服務文件
+- [Amazon RDS 跨區域災難恢復](https://docs.aws.amazon.com/prescriptive-guidance/latest/dr-standard-edition-amazon-rds/design-cross-region-dr.html)
+- [Amazon ECR 跨區域複製](https://docs.aws.amazon.com/AmazonECR/latest/userguide/replication.html)
+- [Amazon EKS 最佳實踐](https://docs.aws.amazon.com/eks/latest/best-practices/)
+- [AWS Database Migration Service 最佳實踐](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_BestPractices.html)
+
+### 聯絡支援
+如需進一步協助，請聯絡您的 AWS Solutions Architect 或透過 AWS Support 提交技術支援請求。
 
 ---
 
-**版本**：v1.0  
-**最後更新**：2024-12-11  
-**適用區域**：Tokyo (ap-northeast-1) → Taipei (ap-east-2)
+**版本**: 1.0  
+**最後更新**: 2025-06-12  
+**適用區域**: Tokyo Region (ap-northeast-1) → Taipei Region (ap-east-2)
