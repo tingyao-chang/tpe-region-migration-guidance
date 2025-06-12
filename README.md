@@ -1,12 +1,14 @@
 # AWS 跨區域遷移指南：Tokyo Region 到 Taipei Region
 
+>  此指南全部由 Amazon Q Developer CLI + MCP Server 產生
+
 ## 概述
 
 本指南提供從 Tokyo Region (ap-northeast-1) 遷移到 Taipei Region (ap-east-2) 的完整策略，主要針對使用 Amazon EKS、Amazon RDS 和 Amazon ECR 的客戶。
 
 ## 遷移架構圖
 
-![完整遷移架構](./generated-diagrams/complete_migration_architecture.png)
+![更新版遷移架構](./generated-diagrams/updated_migration_architecture.png)
 
 ## 適用客戶條件
 
@@ -41,28 +43,38 @@
 
 ### 1. Amazon RDS 遷移策略
 
-**推薦方法**：多層次備份 + AWS DMS 持續同步
+**推薦方法**：RDS 跨區域自動備份複製 + AWS DMS 持續同步
 
 **技術實作**：
 ```bash
-# 1. 設定 AWS Backup 跨區域備份
-aws backup create-backup-plan \
-  --backup-plan BackupPlanName="RDS-CrossRegion-Migration" \
-  --region ap-northeast-1
-
-# 2. 配置跨區域快照複製
-aws rds modify-db-instance \
-  --db-instance-identifier tokyo-db \
+# 1. 啟用 RDS 跨區域自動備份複製（比 AWS Backup 更直接）
+aws rds start-db-instance-automated-backups-replication \
+  --source-db-instance-arn arn:aws:rds:ap-northeast-1:ACCOUNT-ID:db:tokyo-db \
   --backup-retention-period 7 \
-  --copy-tags-to-snapshot \
-  --region ap-northeast-1
+  --region ap-east-2
 
-# 3. AWS DMS 持續複製設定
+# 2. 從複製的備份建立新的 DB 實例
+aws rds restore-db-instance-from-db-snapshot \
+  --db-instance-identifier taipei-db \
+  --db-snapshot-identifier arn:aws:rds:ap-east-2:ACCOUNT-ID:snapshot:automated-backup-snapshot \
+  --db-instance-class db.t3.medium \
+  --region ap-east-2
+
+# 3. 等待 DB 實例可用後，設定 AWS DMS 持續同步
 aws dms create-replication-instance \
   --replication-instance-identifier migration-instance \
   --replication-instance-class dms.t3.medium \
   --allocated-storage 100 \
   --region ap-east-2
+
+# 4. 建立 DMS 複製任務（從 Tokyo 到 Taipei）
+aws dms create-replication-task \
+  --replication-task-identifier tokyo-to-taipei-sync \
+  --source-endpoint-arn arn:aws:dms:ap-northeast-1:ACCOUNT-ID:endpoint:source-endpoint \
+  --target-endpoint-arn arn:aws:dms:ap-east-2:ACCOUNT-ID:endpoint:target-endpoint \
+  --replication-instance-arn arn:aws:dms:ap-east-2:ACCOUNT-ID:rep:migration-instance \
+  --migration-type cdc \
+  --table-mappings file://table-mappings.json
 ```
 
 **預期指標**：
@@ -76,14 +88,15 @@ aws dms create-replication-instance \
 **技術實作**：
 ```bash
 # 1. 匯出完整叢集配置
-eksctl utils write-kubeconfig --cluster tokyo-cluster --region ap-northeast-1
+eksctl utils write-kubeconfig --cluster=tokyo-cluster --region=ap-northeast-1
 kubectl get all --all-namespaces -o yaml > cluster-backup.yaml
 
 # 2. 使用 eksctl 配置檔重建
-eksctl create cluster --config-file=taipei-cluster-config.yaml --region ap-east-2
+eksctl create cluster --config-file=taipei-cluster-config.yaml --region=ap-east-2
 
-# 3. 應用程式部署
-kubectl apply -f cluster-backup.yaml --region ap-east-2
+# 3. 切換到新叢集並部署應用程式
+eksctl utils write-kubeconfig --cluster=taipei-cluster --region=ap-east-2
+kubectl apply -f cluster-backup.yaml
 ```
 
 ### 3. Amazon ECR 遷移策略
