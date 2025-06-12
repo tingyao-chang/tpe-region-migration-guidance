@@ -53,25 +53,65 @@ aws rds start-db-instance-automated-backups-replication \
   --backup-retention-period 7 \
   --region ap-east-2
 
-# 2. 從複製的備份建立新的 DB 實例
-aws rds restore-db-instance-from-db-snapshot \
-  --db-instance-identifier taipei-db \
-  --db-snapshot-identifier arn:aws:rds:ap-east-2:ACCOUNT-ID:snapshot:automated-backup-snapshot \
+# 2. 從跨區域自動備份恢復 DB 實例（使用時間點恢復）
+aws rds restore-db-instance-to-point-in-time \
+  --source-db-instance-automated-backups-arn arn:aws:rds:ap-east-2:ACCOUNT-ID:auto-backup:ab-EXAMPLE \
+  --target-db-instance-identifier taipei-db \
   --db-instance-class db.t3.medium \
   --region ap-east-2
 
-# 3. 等待 DB 實例可用後，設定 AWS DMS 持續同步
+# 3. 建立 table-mappings.json 檔案
+cat > table-mappings.json << 'EOF'
+{
+  "rules": [
+    {
+      "rule-type": "selection",
+      "rule-id": "1",
+      "rule-name": "include-all-tables",
+      "object-locator": {
+        "schema-name": "%",
+        "table-name": "%"
+      },
+      "rule-action": "include"
+    }
+  ]
+}
+EOF
+
+# 4. 建立 AWS DMS 複製執行個體
 aws dms create-replication-instance \
   --replication-instance-identifier migration-instance \
   --replication-instance-class dms.t3.medium \
   --allocated-storage 100 \
   --region ap-east-2
 
-# 4. 建立 DMS 複製任務（從 Tokyo 到 Taipei）
+# 5. 建立 DMS 來源端點
+aws dms create-endpoint \
+  --endpoint-identifier tokyo-source-endpoint \
+  --endpoint-type source \
+  --engine-name mysql \
+  --server-name tokyo-db.cluster-xyz.ap-northeast-1.rds.amazonaws.com \
+  --port 3306 \
+  --username admin \
+  --password your-password \
+  --region ap-east-2
+
+# 6. 建立 DMS 目標端點
+aws dms create-endpoint \
+  --endpoint-identifier taipei-target-endpoint \
+  --endpoint-type target \
+  --engine-name mysql \
+  --server-name taipei-db.cluster-xyz.ap-east-2.rds.amazonaws.com \
+  --port 3306 \
+  --username admin \
+  --password your-password \
+  --region ap-east-2
+
+# 7. 建立 DMS 複製任務（從 Tokyo 到 Taipei）
 aws dms create-replication-task \
   --replication-task-identifier tokyo-to-taipei-sync \
-  --source-endpoint-arn arn:aws:dms:ap-northeast-1:ACCOUNT-ID:endpoint:source-endpoint \
-  --target-endpoint-arn arn:aws:dms:ap-east-2:ACCOUNT-ID:endpoint:target-endpoint \
+  --source-endpoint-arn arn:aws:dms:ap-east-2:ACCOUNT-ID:endpoint:tokyo-source-endpoint \
+  --target-endpoint-arn arn:aws:dms:ap-east-2:ACCOUNT-ID:endpoint:taipei-target-endpoint \
   --replication-instance-arn arn:aws:dms:ap-east-2:ACCOUNT-ID:rep:migration-instance \
   --migration-type cdc \
   --table-mappings file://table-mappings.json
@@ -87,16 +127,44 @@ aws dms create-replication-task \
 
 **技術實作**：
 ```bash
-# 1. 匯出完整叢集配置
-eksctl utils write-kubeconfig --cluster=tokyo-cluster --region=ap-northeast-1
+# 1. 匯出現有叢集配置
+aws eks update-kubeconfig --region ap-northeast-1 --name tokyo-cluster
 kubectl get all --all-namespaces -o yaml > cluster-backup.yaml
 
-# 2. 使用 eksctl 配置檔重建
-eksctl create cluster --config-file=taipei-cluster-config.yaml --region=ap-east-2
+# 2. 匯出其他重要資源
+kubectl get configmaps --all-namespaces -o yaml > configmaps-backup.yaml
+kubectl get secrets --all-namespaces -o yaml > secrets-backup.yaml
+kubectl get pvc --all-namespaces -o yaml > pvc-backup.yaml
 
-# 3. 切換到新叢集並部署應用程式
-eksctl utils write-kubeconfig --cluster=taipei-cluster --region=ap-east-2
+# 3. 建立 Taipei 叢集配置檔
+cat > taipei-cluster-config.yaml << 'EOF'
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: taipei-cluster
+  region: ap-east-2
+
+managedNodeGroups:
+  - name: taipei-workers
+    instanceType: m5.large
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 4
+    volumeSize: 20
+    ssh:
+      allow: true
+EOF
+
+# 4. 使用 eksctl 配置檔建立新叢集
+eksctl create cluster -f taipei-cluster-config.yaml
+
+# 5. 切換到新叢集並部署應用程式
+aws eks update-kubeconfig --region ap-east-2 --name taipei-cluster
 kubectl apply -f cluster-backup.yaml
+kubectl apply -f configmaps-backup.yaml
+kubectl apply -f secrets-backup.yaml
+kubectl apply -f pvc-backup.yaml
 ```
 
 ### 3. Amazon ECR 遷移策略
@@ -153,15 +221,20 @@ done
 - [ ] Taipei Region 基礎網路建立（Amazon VPC、子網路）
 - [ ] IAM 角色和安全群組配置
 - [ ] Amazon ECR 複製驗證
-- [ ] AWS DMS 複製執行個體建立
+- [ ] 準備 DMS 相關配置檔案
 
 ### 第 2 週：資料庫遷移執行
-- [ ] Amazon RDS 快照建立和跨區域復原
+- [ ] 啟用 RDS 跨區域自動備份複製
+- [ ] 從自動備份恢復建立新的 DB 實例
+- [ ] 建立 table-mappings.json 配置檔
+- [ ] 建立 AWS DMS 複製執行個體和端點
 - [ ] AWS DMS 複製任務啟動和監控
 - [ ] 資料一致性驗證
 - [ ] 效能基準測試
 
 ### 第 3 週：EKS 叢集建立與應用部署
+- [ ] 匯出現有 EKS 叢集配置和資源
+- [ ] 建立 Taipei 叢集配置檔（taipei-cluster-config.yaml）
 - [ ] Amazon EKS 叢集建立
 - [ ] 應用程式配置部署
 - [ ] 服務發現和負載平衡配置
