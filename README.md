@@ -47,7 +47,7 @@
 
 **技術實作**：
 ```bash
-# 1. 啟用 RDS 跨區域自動備份複製（比 AWS Backup 更直接）
+# 1. 啟用 RDS 跨區域自動備份複製（在目標區域執行）
 aws rds start-db-instance-automated-backups-replication \
   --source-db-instance-arn arn:aws:rds:ap-northeast-1:ACCOUNT-ID:db:tokyo-db \
   --backup-retention-period 7 \
