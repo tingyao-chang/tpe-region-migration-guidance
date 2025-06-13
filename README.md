@@ -1,6 +1,6 @@
 # AWS 跨區域遷移指南：Tokyo Region 到 Taipei Region
 
->  此指南全部由 Amazon Q Developer CLI + MCP Server 產生
+> 此指南全部由 Amazon Q Developer CLI + MCP Server 產生
 
 ## 概述
 
@@ -247,7 +247,7 @@
 - Ingress 路由和 SSL 憑證狀態
 - ConfigMap 和 Secret 載入狀況
 
-### Amazon ECR 同步狀態
+### Amazon ECR 複製狀態
 **複製狀態檢查**：
 - 複製規則配置和啟用狀態
 - 目標區域儲存庫建立狀況
@@ -320,5 +320,5 @@
 ---
 
 **版本**: 1.0  
-**最後更新**: 2025-06-12  
+**最後更新**: 2025-06-13  
 **適用區域**: Tokyo Region (ap-northeast-1) → Taipei Region (ap-east-2)

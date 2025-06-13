@@ -1,0 +1,1 @@
+Taipei Region (ap-east-2) 是存在的。
