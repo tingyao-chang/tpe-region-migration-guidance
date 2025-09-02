@@ -65,7 +65,7 @@ AWS 跨區域遷移決策流程
 
 ## 遷移架構圖
 
-![更新版遷移架構](./generated-diagrams/updated_migration_architecture.png)
+![容器化架構遷移](./generated-diagrams/container_migration_architecture.png)
 
 ## 適用客戶條件
 
